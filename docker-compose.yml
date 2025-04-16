@@ -1,0 +1,36 @@
+version: '3.8'
+services:
+  ollama:
+    image: ollama/ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+
+  db:
+    image: postgres
+    environment:
+      POSTGRES_PASSWORD: mysecretpassword
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+
+  # go-server:
+  # build:
+  #   ports:
+  #     - "8080:8080"
+  #   environment:
+  #     DB_HOST: db
+  #     DB_PORT: 5432
+  #     DB_USER: postgres
+  #     DB_PASSWORD: mysecretpassword
+  #     DB_NAME: mydata
+  #   depends_on:
+  #     - db
+  #     - ollama
+
+volumes:
+  ollama_data:
+  postgres_data:

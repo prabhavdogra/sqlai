@@ -9,9 +9,12 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 
 	_ "github.com/lib/pq"
 )
+
+var ollamaHost = "https://8766-2a09-bac1-36a0-1b8-00-39-138.ngrok-free.app"
 
 // QueryRequest is the payload received by our Go server.
 type QueryRequest struct {
@@ -20,13 +23,14 @@ type QueryRequest struct {
 
 // OllamaResponse models the assumed response from Ollama.
 type OllamaResponse struct {
-	GeneratedText string `json:"generated_text"`
+	GeneratedText string `json:"response"`
+	Query         string `json:"query"`
 }
 
 // QueryResponse is the final response returned to the client.
 type QueryResponse struct {
-	SQL     string        `json:"sql"`
-	Results []interface{} `json:"results"`
+	SQLQuery string        `json:"sql_query"`
+	Results  []interface{} `json:"results"`
 }
 
 var db *sql.DB
@@ -58,15 +62,25 @@ func main() {
 	// Set up HTTP handler.
 	http.HandleFunc("/query", queryHandler)
 
-	log.Println("Go server listening on port 8080...")
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	log.Println("Go server listening on port 8081...")
+	log.Fatal(http.ListenAndServe(":8081", nil))
 }
 
 // queryHandler handles incoming POST requests to /query.
 func queryHandler(w http.ResponseWriter, r *http.Request) {
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Content-Security-Policy", "default-src 'self' *:8081")
+
 	// Only allow POST.
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed. Use POST.", http.StatusMethodNotAllowed)
+		http.Error(w, "Method not allowed. Use POST.", http.StatusOK)
 		return
 	}
 
@@ -78,7 +92,7 @@ func queryHandler(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
 	// Get the SQL query from the Ollama service (Llama).
-	sqlQuery, err := getSQLQueryFromOllama(req.Query)
+	sqlQuery, err := getSQLQueryFromGPT(req.Query)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Error calling Ollama service: %v", err), http.StatusInternalServerError)
 		return
@@ -92,24 +106,47 @@ func queryHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := QueryResponse{
-		SQL:     sqlQuery,
-		Results: results,
+		SQLQuery: sqlQuery,
+		Results:  results,
 	}
 
-	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
 }
 
-// getSQLQueryFromOllama calls the Ollama service to convert a natural language query into SQL.
-func getSQLQueryFromOllama(prompt string) (string, error) {
-	// Adjust URL according to your Docker Compose configuration.
-	url := "http://localhost:11434/api/generate"
-
-	// Create payload for the Ollama service.
-	payload := map[string]interface{}{
-		"model":  "sqlcoder", // Change this if your Ollama model name differs.
-		"prompt": fmt.Sprintf("Translate the following natural language query into an SQL query: %s", prompt),
+func getSQLQueryFromGPT(prompt string) (string, error) {
+	apiKey := os.Getenv("OPENAI_API_KEY")
+	if apiKey == "" {
+		return "", fmt.Errorf("OPENAI_API_KEY environment variable not set")
 	}
+
+	url := "https://api.openai.com/v1/chat/completions"
+
+	userPrompt := fmt.Sprintf(`You are a helpful assistant that writes SQL queries for PostgreSQL.
+
+Given the schema: %s
+
+Write only the SQL query to answer the question: "%s"
+
+Do not include any explanations, just the query.`, schema, prompt)
+
+	// Build the request payload
+	payload := struct {
+		Model    string `json:"model"`
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}{
+		Model: "gpt-3.5-turbo",
+		Messages: []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		}{
+			{Role: "system", Content: "You are a SQL assistant."},
+			{Role: "user", Content: userPrompt},
+		},
+	}
+
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
 		return "", err
@@ -119,6 +156,7 @@ func getSQLQueryFromOllama(prompt string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Content-Type", "application/json")
 
 	client := &http.Client{}
@@ -128,17 +166,37 @@ func getSQLQueryFromOllama(prompt string) (string, error) {
 	}
 	defer resp.Body.Close()
 
-	// Read and check response.
-	if resp.StatusCode != http.StatusOK {
-		body, _ := ioutil.ReadAll(resp.Body)
-		return "", fmt.Errorf("ollama service error: status %d, response %s", resp.StatusCode, string(body))
-	}
-
-	var ollamaResp OllamaResponse
-	if err := json.NewDecoder(resp.Body).Decode(&ollamaResp); err != nil {
+	bodyBytes, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
 		return "", err
 	}
-	return ollamaResp.GeneratedText, nil
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("OpenAI API error: %s", string(bodyBytes))
+	}
+
+	var result struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(bodyBytes, &result); err != nil {
+		return "", err
+	}
+	if len(result.Choices) == 0 {
+		return "", fmt.Errorf("no response from OpenAI")
+	}
+
+	// Clean the result (remove any leading/trailing markdown or code formatting)
+	raw := result.Choices[0].Message.Content
+	clean := strings.TrimSpace(raw)
+	clean = strings.TrimPrefix(clean, "```sql")
+	clean = strings.TrimPrefix(clean, "```")
+	clean = strings.TrimSuffix(clean, "```")
+	clean = strings.TrimSpace(clean)
+
+	return clean, nil
 }
 
 // runSQLQuery executes the generated SQL query and collects the results.

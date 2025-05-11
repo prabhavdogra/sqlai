@@ -1,12 +1,4 @@
 services:
-  ollama:
-    image: ollama/ollama
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama_data:/root/.ollama
-    entrypoint: ["/bin/bash", "-c", "ollama serve & sleep 3 && ollama pull sqlcoder && wait"]
-
   db:
     image: postgres
     environment:
@@ -14,13 +6,13 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./init-db:/docker-entrypoint-initdb.d
+      - ./init-db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - /var/lib/postgresql/data
   
   go-server:
     build: .
     ports:
-      - "8080:8080"
+      - "8081:8081"
     environment:
       DB_HOST: db
       DB_PORT: 5432
@@ -29,8 +21,8 @@ services:
       DB_NAME: postgres
     depends_on:
       - db
-      - ollama
+      # - ollamaq
 
 volumes:
-  ollama_data:
+  # ollama_data:
   postgres_data:

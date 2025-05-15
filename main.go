@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+
 	"fmt"
 	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
 	"strings"
+
+	"github.com/xwb1989/sqlparser"
 
 	_ "github.com/lib/pq"
 )
@@ -31,6 +34,22 @@ type OllamaResponse struct {
 type QueryResponse struct {
 	SQLQuery string        `json:"sql_query"`
 	Results  []interface{} `json:"results"`
+}
+
+func isReadQuery(query string) bool {
+	stmt, err := sqlparser.Parse(query)
+	if err != nil {
+		return false
+	}
+
+	switch stmt.(type) {
+	case *sqlparser.Select:
+		return true
+	case *sqlparser.Show:
+		return true
+	default:
+		return false
+	}
 }
 
 var db *sql.DB
@@ -95,6 +114,9 @@ func queryHandler(w http.ResponseWriter, r *http.Request) {
 	sqlQuery, err := getSQLQueryFromGPT(req.Query)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Error calling Ollama service: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if !isReadQuery(sqlQuery) {
 		return
 	}
 

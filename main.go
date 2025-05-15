@@ -117,6 +117,11 @@ func queryHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !isReadQuery(sqlQuery) {
+		errorResp := QueryResponse{
+			SQLQuery: sqlQuery,
+			Results:  nil,
+		}
+		json.NewEncoder(w).Encode(errorResp)
 		return
 	}
 
